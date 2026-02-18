@@ -20,18 +20,10 @@ builds:
       - -X main.buildTime={{ .Date }}
       - -X main.goVersion={{ .Env.GOVERSION }}
     goos:
-      - linux
-      - windows
-      - darwin
-      - freebsd
       - netbsd
     goarch:
       - amd64
       - arm64
-      - riscv64
-      - s390x
-      - mips64
-      - arm
     main: ./cmd/picoclaw
     ignore:
       - goos: windows
@@ -42,22 +34,6 @@ builds:
         goarch: mips64
       - goos: netbsd
         goarch: arm
-
-dockers_v2:
-  - id: picoclaw
-    dockerfile: Dockerfile.goreleaser
-    ids:
-      - picoclaw
-    images:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw"
-      - "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}"
-    tags:
-      - "{{ .Tag }}"
-      - "latest"
-    platforms:
-      - linux/amd64
-      - linux/arm64
-      - linux/riscv64
 
 archives:
   - formats: [tar.gz]

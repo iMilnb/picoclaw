@@ -36,6 +36,12 @@ builds:
     ignore:
       - goos: windows
         goarch: arm
+      - goos: netbsd
+        goarch: s390x
+      - goos: netbsd
+        goarch: mips64
+      - goos: netbsd
+        goarch: arm
 
 dockers_v2:
   - id: picoclaw

@@ -40,6 +40,12 @@ builds:
     ignore:
       - goos: windows
         goarch: arm
+      - goos: netbsd
+        goarch: s390x
+      - goos: netbsd
+        goarch: mips64
+      - goos: netbsd
+        goarch: arm
 
   - id: picoclaw-launcher
     binary: picoclaw-launcher

@@ -23,6 +23,7 @@ builds:
       - -X github.com/sipeed/picoclaw/pkg/config.BuildTime={{ .Date }}
       - -X github.com/sipeed/picoclaw/pkg/config.GoVersion={{ .Env.GOVERSION }}
     goos:
+      - linux
       - netbsd
     goarch:
       - amd64
@@ -52,6 +53,7 @@ builds:
     ldflags:
       - -s -w
     goos:
+      - linux
       - netbsd
     goarch:
       - amd64
@@ -76,6 +78,7 @@ builds:
       - -s -w
     goos:
       - netbsd
+      - linux
     goarch:
       - amd64
       - arm64

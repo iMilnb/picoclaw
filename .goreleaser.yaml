@@ -22,17 +22,10 @@ builds:
       - -X github.com/sipeed/picoclaw/cmd/picoclaw/internal.buildTime={{ .Date }}
       - -X github.com/sipeed/picoclaw/cmd/picoclaw/internal.goVersion={{ .Env.GOVERSION }}
     goos:
-      - linux
-      - windows
-      - darwin
-      - freebsd
       - netbsd
     goarch:
       - amd64
       - arm64
-      - riscv64
-      - loong64
-      - arm
     goarm:
       - "6"
       - "7"
@@ -56,16 +49,10 @@ builds:
     ldflags:
       - -s -w
     goos:
-      - linux
-      - windows
-      - darwin
-      - freebsd
+      - netbsd
     goarch:
       - amd64
       - arm64
-      - riscv64
-      - loong64
-      - arm
     goarm:
       - "6"
       - "7"
@@ -83,16 +70,10 @@ builds:
     ldflags:
       - -s -w
     goos:
-      - linux
-      - windows
-      - darwin
-      - freebsd
+      - netbsd
     goarch:
       - amd64
       - arm64
-      - riscv64
-      - loong64
-      - arm
     goarm:
       - "6"
       - "7"
@@ -100,24 +81,6 @@ builds:
     ignore:
       - goos: windows
         goarch: arm
-
-dockers_v2:
-  - id: picoclaw
-    dockerfile: docker/Dockerfile.goreleaser
-    extra_files:
-      - docker/entrypoint.sh
-    ids:
-      - picoclaw
-    images:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw"
-      - "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}"
-    tags:
-      - "{{ .Tag }}"
-      - "latest"
-    platforms:
-      - linux/amd64
-      - linux/arm64
-      - linux/riscv64
 
 archives:
   - formats: [tar.gz]

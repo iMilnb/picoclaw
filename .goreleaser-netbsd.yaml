@@ -1,0 +1,115 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+# Separate Goreleaser config for NetBSD-only releases (arm64 and amd64)
+# This file is intentionally separate from .goreleaser.yaml to avoid conflicts
+# when rebasing from the main release branch.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+    - sh -c 'cd web/frontend && pnpm install && pnpm build:backend'
+    - go install github.com/tc-hib/go-winres@latest
+    - go-winres make --in web/backend/winres/winres.json --out web/backend/rsrc --product-version={{ .Version }} --file-version={{ .Version }}
+
+builds:
+  - id: picoclaw-netbsd
+    binary: picoclaw
+    env:
+      - CGO_ENABLED=0
+    tags:
+      - stdjson
+    ldflags:
+      - -s -w
+      - -X github.com/sipeed/picoclaw/pkg/config.Version={{ .Version }}
+      - -X github.com/sipeed/picoclaw/pkg/config.GitCommit={{ .ShortCommit }}
+      - -X github.com/sipeed/picoclaw/pkg/config.BuildTime={{ .Date }}
+      - -X github.com/sipeed/picoclaw/pkg/config.GoVersion={{ .Env.GOVERSION }}
+    goos:
+      - netbsd
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/picoclaw
+
+  - id: picoclaw-launcher-netbsd
+    binary: picoclaw-launcher
+    env:
+      - CGO_ENABLED=0
+    tags:
+      - stdjson
+    ldflags:
+      - -s -w
+    goos:
+      - netbsd
+    goarch:
+      - amd64
+      - arm64
+    main: ./web/backend
+
+  - id: picoclaw-launcher-tui-netbsd
+    binary: picoclaw-launcher-tui
+    env:
+      - CGO_ENABLED=0
+    tags:
+      - stdjson
+    ldflags:
+      - -s -w
+    goos:
+      - netbsd
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/picoclaw-launcher-tui
+
+archives:
+  - id: picoclaw-netbsd-archives
+    builds:
+      - picoclaw-netbsd
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}aarch64
+      {{- else }}{{ .Arch }}{{ end }}
+
+  - id: launcher-netbsd-archives
+    builds:
+      - picoclaw-launcher-netbsd
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}-launcher_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}aarch64
+      {{- else }}{{ .Arch }}{{ end }}
+
+  - id: launcher-tui-netbsd-archives
+    builds:
+      - picoclaw-launcher-tui-netbsd
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}-launcher-tui_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}aarch64
+      {{- else }}{{ .Arch }}{{ end }}
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  disable: false
+  footer: >-
+
+    ---
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).
+
+    NetBSD-specific release for amd64 and arm64 architectures.

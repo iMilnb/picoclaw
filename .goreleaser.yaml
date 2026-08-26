@@ -165,32 +165,32 @@ archives:
       - goos: windows
         formats: [zip]
 
-nfpms:
-  - id: picoclaw
-    ids:
-      - picoclaw
-      - picoclaw-launcher
-    package_name: picoclaw
-    file_name_template: >-
-      {{ .PackageName }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "arm64" }}aarch64
-      {{- else if eq .Arch "arm" }}armv{{ .Arm }}
-      {{- else }}{{ .Arch }}{{ end }}
-    vendor: picoclaw
-    homepage: https://github.com/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw
-    maintainer: picoclaw contributors
-    description: picoclaw - a tool for managing and running tasks
-    license: MIT
-    formats:
-      - rpm
-      - deb
-    bindir: /usr/bin
-    contents:
-      - src: web/picoclaw-launcher.desktop
-        dst: /usr/share/applications/picoclaw-launcher.desktop
-      - src: web/picoclaw-launcher.png
-        dst: /usr/share/icons/hicolor/512x512/apps/picoclaw-launcher.png
+#nfpms:
+#  - id: picoclaw
+#    ids:
+#      - picoclaw
+#      - picoclaw-launcher
+#    package_name: picoclaw
+#    file_name_template: >-
+#      {{ .PackageName }}_
+#      {{- if eq .Arch "amd64" }}x86_64
+#      {{- else if eq .Arch "arm64" }}aarch64
+#      {{- else if eq .Arch "arm" }}armv{{ .Arm }}
+#      {{- else }}{{ .Arch }}{{ end }}
+#    vendor: picoclaw
+#    homepage: https://github.com/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw
+#    maintainer: picoclaw contributors
+#    description: picoclaw - a tool for managing and running tasks
+#    license: MIT
+#    formats:
+#      - rpm
+#      - deb
+#    bindir: /usr/bin
+#    contents:
+#      - src: web/picoclaw-launcher.desktop
+#        dst: /usr/share/applications/picoclaw-launcher.desktop
+#      - src: web/picoclaw-launcher.png
+#        dst: /usr/share/icons/hicolor/512x512/apps/picoclaw-launcher.png
 
 changelog:
   sort: asc

@@ -29,7 +29,9 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	turnCtx = WithAgentLoop(turnCtx, al)
 
 	al.registerActiveTurn(ts)
-	defer al.clearActiveTurn(ts)
+	if !ts.opts.HoldSessionClaim {
+		defer al.clearActiveTurn(ts)
+	}
 
 	if al.takePendingStop(ts.sessionKey) {
 		_ = ts.requestHardAbort()

@@ -121,6 +121,13 @@ func (al *AgentLoop) prepareInboundMessageForAgent(
 }
 
 func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+	return al.processMessageWithClaim(ctx, msg, false)
+}
+
+// processMessageWithClaim processes an inbound message. When holdClaim is true,
+// the session's active-turn registration is kept alive after the turn ends; the
+// caller must release it (see runTurnWithSteering / releaseSessionClaimIfIdle).
+func (al *AgentLoop) processMessageWithClaim(ctx context.Context, msg bus.InboundMessage, holdClaim bool) (string, error) {
 	msg = al.prepareInboundMessageForAgent(ctx, msg)
 
 	// Add message preview to log (show full content for error messages)
@@ -192,6 +199,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		EnableSummary:           true,
 		SendResponse:            false,
 		AllowInterimPicoPublish: true,
+		HoldSessionClaim:        holdClaim,
 	}
 	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)

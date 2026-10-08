@@ -18,9 +18,24 @@ func (al *AgentLoop) processMessageSync(ctx context.Context, msg bus.InboundMess
 	al.publishResponseOrError(ctx, msg.Channel, msg.ChatID, msg.SessionKey, response, err)
 }
 
-func (al *AgentLoop) runTurnWithSteering(ctx context.Context, initialMsg bus.InboundMessage) {
-	// Process the initial message
-	response, err := al.processMessage(ctx, initialMsg)
+func (al *AgentLoop) runTurnWithSteering(ctx context.Context, initialMsg bus.InboundMessage, sessionKey string) {
+	// The caller (Run) claimed the session before spawning this worker. Keep
+	// that claim held for the whole turn plus the post-turn steering drain:
+	// releasing it between the turn and the drain would let a new inbound
+	// message claim the session for itself, which makes the drain's
+	// continuation fail with "turn still active" and strands already queued
+	// messages — they would then only be answered when the next turn starts,
+	// injected before that message, so the agent answers the older question
+	// first.
+	claimReleased := false
+	defer func() {
+		if !claimReleased {
+			al.releaseSessionTurnState(sessionKey, nil)
+		}
+	}()
+
+	// Process the initial message, holding the session claim across the turn.
+	response, err := al.processMessageWithClaim(ctx, initialMsg, true)
 	if err != nil {
 		if !al.maybePublishError(ctx, initialMsg.Channel, initialMsg.ChatID, initialMsg.SessionKey, err) {
 			return // context canceled
@@ -44,27 +59,45 @@ func (al *AgentLoop) runTurnWithSteering(ctx context.Context, initialMsg bus.Inb
 		return
 	}
 
-	continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target)
-	if continueErr != nil {
-		logger.WarnCF("agent", "Failed to continue queued steering",
-			map[string]any{
-				"channel": target.Channel,
-				"chat_id": target.ChatID,
-				"error":   continueErr.Error(),
-			})
-	} else if continued != "" {
-		finalResponse = continued
-	}
+	for {
+		continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target, true)
+		if continueErr != nil {
+			logger.WarnCF("agent", "Failed to continue queued steering",
+				map[string]any{
+					"channel": target.Channel,
+					"chat_id": target.ChatID,
+					"error":   continueErr.Error(),
+				})
+		} else if continued != "" {
+			finalResponse = continued
+		}
 
-	// Publish final response
-	if finalResponse != "" {
-		al.PublishResponseIfNeeded(ctx, target.Channel, target.ChatID, target.SessionKey, finalResponse)
+		// Publish final response
+		if finalResponse != "" {
+			al.PublishResponseIfNeeded(ctx, target.Channel, target.ChatID, target.SessionKey, finalResponse)
+			finalResponse = ""
+		}
+
+		if continueErr != nil {
+			return
+		}
+
+		// Release the claim only when the queue is empty; if messages arrived
+		// during the drain tail, keep the claim and drain them here.
+		if al.releaseSessionClaimIfIdle(sessionKey) {
+			claimReleased = true
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
 	}
 }
 
 func (al *AgentLoop) drainQueuedSteeringContinuations(
 	ctx context.Context,
 	target *continuationTarget,
+	claimHeld bool,
 ) (string, error) {
 	if target == nil {
 		return "", nil
@@ -84,7 +117,13 @@ func (al *AgentLoop) drainQueuedSteeringContinuations(
 				"queue_depth": al.pendingSteeringCountForScope(target.SessionKey),
 			})
 
-		continued, continueErr := al.Continue(ctx, target.SessionKey, target.Channel, target.ChatID)
+		var continued string
+		var continueErr error
+		if claimHeld {
+			continued, continueErr = al.runSteeringContinuation(ctx, target.SessionKey, target.Channel, target.ChatID, true)
+		} else {
+			continued, continueErr = al.Continue(ctx, target.SessionKey, target.Channel, target.ChatID)
+		}
 		if continueErr != nil {
 			return finalResponse, continueErr
 		}

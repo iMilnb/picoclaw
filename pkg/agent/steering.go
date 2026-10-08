@@ -315,6 +315,7 @@ func (al *AgentLoop) continueWithSteeringMessages(
 	sessionKey, channel, chatID string,
 	scope *session.SessionScope,
 	steeringMsgs []providers.Message,
+	holdClaim bool,
 ) (string, error) {
 	dispatch := DispatchRequest{
 		SessionKey:   sessionKey,
@@ -334,6 +335,7 @@ func (al *AgentLoop) continueWithSteeringMessages(
 		SendResponse:            false,
 		InitialSteeringMessages: steeringMsgs,
 		SkipInitialSteeringPoll: true,
+		HoldSessionClaim:        holdClaim,
 	})
 }
 
@@ -384,25 +386,36 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 		// Another Continue just claimed the slot; let it handle the steering.
 		return "", nil
 	}
+	// Conditional delete: a continuation turn replaces the placeholder with its
+	// real turnState and releases it at turn end, so this is a no-op then.
+	defer al.releaseSessionTurnState(sessionKey, placeholder)
 
 	if err := al.ensureHooksInitialized(ctx); err != nil {
-		al.activeTurnStates.Delete(sessionKey)
 		return "", err
 	}
 	if err := al.ensureMCPInitialized(ctx); err != nil {
-		al.activeTurnStates.Delete(sessionKey)
 		return "", err
 	}
 
+	return al.runSteeringContinuation(ctx, sessionKey, channel, chatID, false)
+}
+
+// runSteeringContinuation dequeues pending steering messages for the session
+// and runs them through the agent loop as a continuation turn. When holdClaim
+// is true, the caller must already own the session's active-turn registration;
+// the continuation keeps that claim alive instead of releasing it at turn end.
+func (al *AgentLoop) runSteeringContinuation(
+	ctx context.Context,
+	sessionKey, channel, chatID string,
+	holdClaim bool,
+) (string, error) {
 	steeringMsgs := al.dequeueSteeringMessagesForScopeWithFallback(sessionKey)
 	if len(steeringMsgs) == 0 {
-		al.activeTurnStates.Delete(sessionKey)
 		return "", nil
 	}
 
 	agent := al.agentForSession(sessionKey)
 	if agent == nil {
-		al.activeTurnStates.Delete(sessionKey)
 		return "", fmt.Errorf("no agent available for session %q", sessionKey)
 	}
 
@@ -417,7 +430,46 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 		scope = metaStore.GetSessionScope(sessionKey)
 	}
 
-	return al.continueWithSteeringMessages(ctx, agent, sessionKey, channel, chatID, scope, steeringMsgs)
+	return al.continueWithSteeringMessages(ctx, agent, sessionKey, channel, chatID, scope, steeringMsgs, holdClaim)
+}
+
+// releaseSessionClaimIfIdle releases the session's active-turn registration
+// only when no steering messages are pending for the scope. The pending check
+// and the release are performed under the steering lock so a message being
+// enqueued concurrently is either seen here (claim stays held and is drained)
+// or routed to a fresh turn by the inbound loop (claim already released). If a
+// message slipped into the queue during the release window, the claim is
+// re-acquired so the queued messages are drained by the current worker.
+func (al *AgentLoop) releaseSessionClaimIfIdle(sessionKey string) bool {
+	if al.steering == nil {
+		al.releaseSessionTurnState(sessionKey, nil)
+		return true
+	}
+
+	al.steering.mu.Lock()
+	if len(al.steering.queues[normalizeSteeringScope(sessionKey)]) > 0 {
+		al.steering.mu.Unlock()
+		return false
+	}
+	al.releaseSessionTurnState(sessionKey, nil)
+	stranded := len(al.steering.queues[normalizeSteeringScope(sessionKey)]) > 0
+	al.steering.mu.Unlock()
+
+	if !stranded {
+		return true
+	}
+
+	// A message was enqueued against the claim just before it was released.
+	// Re-claim the session so the current worker drains it; if another worker
+	// claimed the session meanwhile, its turn will pick the queue up.
+	placeholder := &turnState{
+		turnID: makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
+		phase:  TurnPhaseSetup,
+	}
+	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+		return true
+	}
+	return false
 }
 
 func (al *AgentLoop) InterruptGraceful(hint string) error {

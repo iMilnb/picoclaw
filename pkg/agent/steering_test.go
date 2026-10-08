@@ -2023,3 +2023,326 @@ func init() {
 	// with the proper argument serialization.
 	_ = json.Marshal
 }
+
+// --- session claim lifecycle across post-turn steering drain (regression) ---
+
+// TestAgentLoop_ReleaseSessionClaimIfIdle verifies that the session claim is
+// only released when no steering messages are pending for the scope. Releasing
+// the claim while messages are queued is what stranded queued messages and let
+// the agent answer an older question before a newer one.
+func TestAgentLoop_ReleaseSessionClaimIfIdle(t *testing.T) {
+	al, _, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	sessionKey := "test:chat-claim"
+	placeholder := &turnState{
+		turnID: makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
+		phase:  TurnPhaseSetup,
+	}
+
+	// Idle queue: the claim must be released.
+	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+		t.Fatal("expected to claim session")
+	}
+	if !al.releaseSessionClaimIfIdle(sessionKey) {
+		t.Fatal("expected release when no steering is pending")
+	}
+	if _, ok := al.activeTurnStates.Load(sessionKey); ok {
+		t.Fatal("expected claim to be released when idle")
+	}
+
+	// Pending queue: the claim must stay held so the owner drains the queue.
+	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+		t.Fatal("expected to claim session")
+	}
+	if err := al.enqueueSteeringMessage(sessionKey, "", providers.Message{
+		Role:    "user",
+		Content: "queued while claim held",
+	}); err != nil {
+		t.Fatalf("enqueue steering: %v", err)
+	}
+	if al.releaseSessionClaimIfIdle(sessionKey) {
+		t.Fatal("expected claim to stay held while steering is pending")
+	}
+	if _, ok := al.activeTurnStates.Load(sessionKey); !ok {
+		t.Fatal("expected claim to remain registered while steering is pending")
+	}
+
+	al.clearSteeringMessagesForScope(sessionKey)
+	al.releaseSessionTurnState(sessionKey, nil)
+}
+
+// TestAgentLoop_DrainQueuedSteering_KeepsHeldClaim pins the stranding
+// mechanism and its fix: while a worker holds the session claim, a drain that
+// re-acquires the claim (the legacy Continue path) fails and leaves queued
+// messages stranded, which made the next turn answer the older question
+// first. A claim-holding drain instead processes the queue and keeps the
+// claim alive so the owner releases only once the queue is empty.
+func TestAgentLoop_DrainQueuedSteering_KeepsHeldClaim(t *testing.T) {
+	al, _, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	sessionKey := "test:chat-drain"
+	placeholder := &turnState{
+		turnID: makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
+		phase:  TurnPhaseSetup,
+	}
+	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+		t.Fatal("expected to claim session")
+	}
+	defer al.releaseSessionTurnState(sessionKey, nil)
+
+	if err := al.enqueueSteeringMessage(sessionKey, "", providers.Message{
+		Role:    "user",
+		Content: "queued while turn active",
+	}); err != nil {
+		t.Fatalf("enqueue steering: %v", err)
+	}
+
+	target := &continuationTarget{SessionKey: sessionKey, Channel: "test", ChatID: "chat1"}
+
+	// Legacy behavior: a claim-reacquiring drain fails while the session is
+	// claimed, and the queued message stays stranded.
+	if _, err := al.drainQueuedSteeringContinuations(context.Background(), target, false); err == nil {
+		t.Fatal("expected claim-reacquiring drain to fail while the session is claimed")
+	}
+	if n := al.pendingSteeringCountForScope(sessionKey); n != 1 {
+		t.Fatalf("expected the queued message to remain stranded, got %d pending", n)
+	}
+
+	// Fixed behavior: a claim-holding drain processes the queue without
+	// releasing the claim.
+	resp, err := al.drainQueuedSteeringContinuations(context.Background(), target, true)
+	if err != nil {
+		t.Fatalf("claim-holding drain failed: %v", err)
+	}
+	if resp != "Mock response" {
+		t.Fatalf("expected continuation response, got %q", resp)
+	}
+	if n := al.pendingSteeringCountForScope(sessionKey); n != 0 {
+		t.Fatalf("expected queue to be drained, got %d pending", n)
+	}
+	if al.getActiveTurnState(sessionKey) == nil {
+		t.Fatal("expected the claim to remain held after a claim-holding drain")
+	}
+
+	// Once the queue is empty the owner can release it.
+	if !al.releaseSessionClaimIfIdle(sessionKey) {
+		t.Fatal("expected release once the queue is empty")
+	}
+}
+
+// claimDrainProvider blocks each of its first two calls until released,
+// recording the messages seen on the second call.
+type claimDrainProvider struct {
+	mu              sync.Mutex
+	calls           int
+	firstStarted    chan struct{}
+	releaseFirst    chan struct{}
+	secondStarted   chan struct{}
+	releaseSecond   chan struct{}
+	secondMessages  []providers.Message
+	firstStartOnce  sync.Once
+	secondStartOnce sync.Once
+}
+
+func (p *claimDrainProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	p.mu.Unlock()
+
+	switch call {
+	case 1:
+		p.firstStartOnce.Do(func() { close(p.firstStarted) })
+		<-p.releaseFirst
+		return &providers.LLMResponse{Content: "answer one"}, nil
+	case 2:
+		p.secondStartOnce.Do(func() { close(p.secondStarted) })
+		<-p.releaseSecond
+		p.mu.Lock()
+		p.secondMessages = append([]providers.Message(nil), messages...)
+		p.mu.Unlock()
+		return &providers.LLMResponse{Content: "answer two"}, nil
+	default:
+		return nil, fmt.Errorf("unexpected provider call %d", call)
+	}
+}
+
+func (p *claimDrainProvider) GetDefaultModel() string { return "claim-drain-mock" }
+
+// TestAgentLoop_RunTurnWithSteering_HoldsSessionClaimAcrossDrain reproduces
+// the stranding race: while the first turn is running a second message is
+// queued for the session. The worker that owns the session claim must keep it
+// held across the post-turn steering drain, so a new inbound message cannot
+// claim the session between the turn and the drain (which previously made the
+// drain give up and inject the older queued message into the next turn,
+// answering it before the newer question).
+func TestAgentLoop_RunTurnWithSteering_HoldsSessionClaimAcrossDrain(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &claimDrainProvider{
+		firstStarted:  make(chan struct{}),
+		releaseFirst:  make(chan struct{}),
+		secondStarted: make(chan struct{}),
+		releaseSecond: make(chan struct{}),
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	initialMsg := bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  "test",
+			ChatID:   "chat1",
+			ChatType: "direct",
+			SenderID: "user1",
+		},
+		Content: "question one",
+	}
+	sessionKey, _, ok := al.resolveSteeringTarget(initialMsg)
+	if !ok {
+		t.Fatal("expected routable message")
+	}
+
+	// Mimic Run(): claim the session with a placeholder before spawning the worker.
+	placeholder := &turnState{
+		turnID: makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
+		phase:  TurnPhaseSetup,
+	}
+	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+		t.Fatal("expected to claim session")
+	}
+
+	// Watch the claim continuously: from the initial claim until the worker
+	// finishes draining, the session must never appear idle. The old code
+	// released the claim between the turn and the drain, which is exactly the
+	// window a new inbound message could slip into and strand the queued one.
+	watchStop := make(chan struct{})
+	claimMissed := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case <-watchStop:
+				return
+			default:
+			}
+			if _, ok := al.activeTurnStates.Load(sessionKey); !ok {
+				select {
+				case claimMissed <- struct{}{}:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		al.runTurnWithSteering(context.Background(), initialMsg, sessionKey)
+	}()
+
+	select {
+	case <-provider.firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for first provider call to start")
+	}
+
+	// A second message arrives while the first turn is in flight.
+	if err := al.enqueueSteeringMessage(sessionKey, "", providers.Message{
+		Role:    "user",
+		Content: "question two",
+	}); err != nil {
+		t.Fatalf("enqueue steering: %v", err)
+	}
+	close(provider.releaseFirst)
+
+	select {
+	case <-provider.secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for steering continuation to start")
+	}
+	// The critical window (turn end -> continuation claim) has passed; the
+	// final release after the drain is expected and must not be watched.
+	close(watchStop)
+
+	// While the continuation runs, the session must stay claimed so a new
+	// inbound message is routed to the steering queue instead of starting a
+	// competing turn that would strand the queued message.
+	if al.getActiveTurnState(sessionKey) == nil {
+		t.Fatal("expected session claim to be held across the steering drain")
+	}
+	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, &turnState{
+		turnID: makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
+		phase:  TurnPhaseSetup,
+	}); !loaded {
+		al.activeTurnStates.Delete(sessionKey)
+		t.Fatal("a new inbound could claim the session during the drain")
+	}
+
+	close(provider.releaseSecond)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for runTurnWithSteering to finish")
+	}
+	select {
+	case <-claimMissed:
+		t.Fatal("session claim was released between the turn and the steering drain")
+	default:
+	}
+
+	// After the drain the claim must be released and the queue empty.
+	if al.getActiveTurnState(sessionKey) != nil {
+		t.Fatal("expected session claim to be released after draining")
+	}
+	if n := al.pendingSteeringCountForScope(sessionKey); n != 0 {
+		t.Fatalf("expected steering queue to be drained, %d message(s) left", n)
+	}
+
+	provider.mu.Lock()
+	calls := provider.calls
+	secondMessages := append([]providers.Message(nil), provider.secondMessages...)
+	provider.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("expected 2 provider calls, got %d", calls)
+	}
+	foundQueued := false
+	for _, msg := range secondMessages {
+		if msg.Role == "user" && msg.Content == "question two" {
+			foundQueued = true
+			break
+		}
+	}
+	if !foundQueued {
+		t.Fatal("expected queued message to be answered by the continuation")
+	}
+
+	pubCtx, pubCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer pubCancel()
+	select {
+	case out := <-msgBus.OutboundChan():
+		if out.Content != "answer two" {
+			t.Fatalf("expected continuation answer, got %q", out.Content)
+		}
+	case <-pubCtx.Done():
+		t.Fatal("expected outbound continuation response")
+	}
+}

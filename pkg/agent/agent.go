@@ -97,19 +97,24 @@ type processOptions struct {
 	UserMessage             string          // User message content (may include prefix)
 	ForcedSkills            []string        // Skills explicitly requested for this message
 	TurnProfile             config.EffectiveTurnProfile
-	SystemPromptOverride    string                 // Override the default system prompt (Used by SubTurns)
-	Media                   []string               // media:// refs from inbound message
-	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
-	DefaultResponse         string                 // Response when LLM returns empty
-	EnableSummary           bool                   // Whether to trigger summarization
-	SendResponse            bool                   // Whether to send response via bus
-	AllowInterimPicoPublish bool                   // Whether pico tool-call interim text can be published when SendResponse is false
-	SuppressToolFeedback    bool                   // Whether to suppress inline tool feedback messages
-	NoHistory               bool                   // If true, don't load session history (for heartbeat)
-	SkipInitialSteeringPoll bool                   // If true, skip the steering poll at loop start (used by Continue)
-	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
-	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
-	SessionScope            *session.SessionScope  // Session scope snapshot for events/hooks
+	SystemPromptOverride    string              // Override the default system prompt (Used by SubTurns)
+	Media                   []string            // media:// refs from inbound message
+	InitialSteeringMessages []providers.Message // Steering messages from refactor/agent
+	DefaultResponse         string              // Response when LLM returns empty
+	EnableSummary           bool                // Whether to trigger summarization
+	SendResponse            bool                // Whether to send response via bus
+	AllowInterimPicoPublish bool                // Whether pico tool-call interim text can be published when SendResponse is false
+	SuppressToolFeedback    bool                // Whether to suppress inline tool feedback messages
+	NoHistory               bool                // If true, don't load session history (for heartbeat)
+	SkipInitialSteeringPoll bool                // If true, skip the steering poll at loop start (used by Continue)
+	// HoldSessionClaim keeps the session's active-turn registration alive after
+	// the turn ends. The caller (runTurnWithSteering) owns the claim until its
+	// post-turn steering drain completes, so no inbound message can claim the
+	// session between the turn and the drain and strand queued messages.
+	HoldSessionClaim bool
+	InboundContext   *bus.InboundContext    // Normalized inbound facts for events/hooks
+	RouteResult      *routing.ResolvedRoute // Route decision snapshot for events/hooks
+	SessionScope     *session.SessionScope  // Session scope snapshot for events/hooks
 }
 
 type continuationTarget struct {
@@ -278,7 +283,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 						Channel:    m.Channel,
 						ChatID:     m.ChatID,
 					}
-					continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target)
+					continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target, false)
 					if continueErr != nil {
 						al.maybePublishError(ctx, m.Channel, m.ChatID, sessionKey, continueErr)
 						return
@@ -289,7 +294,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 					return
 				}
 
-				al.runTurnWithSteering(ctx, m)
+				al.runTurnWithSteering(ctx, m, sessionKey)
 			}(msg, placeholder)
 
 			// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
